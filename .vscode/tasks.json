@@ -1,0 +1,25 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build kernel.img",
+            "type": "shell",
+            "command": "make",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "detail": "Compile the code and generate the kernel.img binary using the provided Makefile."
+        },
+        {
+            "label": "Clean kernel build",
+            "type": "shell",
+            "command": "make clean",
+            "problemMatcher": [],
+            "detail": "Remove the generated .o, .elf, and .img files."
+        }
+    ]
+}

@@ -1,0 +1,12 @@
+# A6OS Build Artifacts
+build/
+*.img
+*.elf
+*.o
+
+# Raspberry Pi Firmware
+bootcode.bin
+start.elf
+
+# OS generated files
+.DS_Store
