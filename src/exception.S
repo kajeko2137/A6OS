@@ -33,14 +33,38 @@ undef_handler:
     b halt_sys
 
 swi_handler:
-    // sys_exit destroys the process context entirely, no need to save/restore
+    push {lr}               // Save return address (bl clobbers LR in SVC mode)
+
     cmp r7, #1
     beq sys_exit
+
+    cmp r7, #2
+    beq sys_alloc_page
+
+    cmp r7, #3
+    beq sys_free_page
 
     // Unknown syscall
     ldr r0, =msg_swi
     bl uart_puts
     b halt_sys
+
+// sys_alloc_page — Syscall #2
+// Allocates a new page for the calling process.
+// Returns: r0 = virtual address of new page (0 if fail)
+sys_alloc_page:
+    bl alloc_process_page   // r0 = virtual address (or 0)
+    pop {lr}
+    movs pc, lr             // Return to process, r0 is preserved!
+
+// sys_free_page — Syscall #3
+// Frees a previously allocated page.
+// Argument: r0 = virtual address
+// Returns: r0 = 0 (Success) or -1 (Fail)
+sys_free_page:
+    bl free_process_page
+    pop {lr}
+    movs pc, lr
 
 prefetch_handler:
     ldr r0, =msg_prefetch
@@ -50,6 +74,19 @@ prefetch_handler:
 data_handler:
     ldr r0, =msg_data
     bl uart_puts
+    
+    // Read and print DFSR
+    mrc p15, 0, r0, c5, c0, 0
+    bl uart_print_hex
+    ldr r0, =msg_space
+    bl uart_puts
+    
+    // Read and print DFAR
+    mrc p15, 0, r0, c6, c0, 0
+    bl uart_print_hex
+    ldr r0, =msg_crlf
+    bl uart_puts
+    
     b halt_sys
 
 irq_handler:
@@ -110,3 +147,6 @@ msg_prefetch: .asciz "\r\n[EXCEPT] Prefetch Abort\r\n"
 msg_data:     .asciz "\r\n[EXCEPT] Data Abort\r\n"
 msg_irq:      .asciz "\r\n[EXCEPT] Unhandled IRQ\r\n"
 msg_fiq:      .asciz "\r\n[EXCEPT] Unhandled FIQ\r\n"
+msg_swi_entry: .asciz "[DBG] SWI handler entered\r\n"
+msg_space:    .asciz " "
+msg_crlf:     .asciz "\r\n"

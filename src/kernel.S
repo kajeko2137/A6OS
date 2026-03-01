@@ -3,7 +3,38 @@
 
 // Program Entry Point
 _start:
-    // Setup the stack pointer
+    // Setup Stack Pointers for all exception modes
+    
+    // IRQ Mode
+    mrs r0, cpsr
+    bic r0, r0, #0x1F
+    orr r1, r0, #0x12
+    msr cpsr_c, r1
+    mov sp, #0x7000
+
+    // FIQ Mode
+    orr r1, r0, #0x11
+    msr cpsr_c, r1
+    mov sp, #0x6000
+
+    // Abort Mode
+    orr r1, r0, #0x17
+    msr cpsr_c, r1
+    mov sp, #0x5000
+
+    // Undefined Mode
+    orr r1, r0, #0x1B
+    msr cpsr_c, r1
+    mov sp, #0x4000
+
+    // System/User Mode
+    orr r1, r0, #0x1F
+    msr cpsr_c, r1
+    mov sp, #0x3000
+
+    // Return to Supervisor Mode (SVC)
+    orr r1, r0, #0x13
+    msr cpsr_c, r1
     mov sp, #0x8000
 
     // Sterilize the .bss section (Zero-out the page table)
@@ -42,9 +73,8 @@ _start:
 
     // Enable the MMU with the kernel's L1 table (returned in r0)
     bl enable_mmu
-    
-    // Send the debug message
-    ldr r0, =debug_msg
+
+    ldr r0, =dbg1
     bl uart_puts
 
     // Launch process1
@@ -95,6 +125,12 @@ launch_process:
     bl alloc_process
     // r0 = L1 table base, r1 = entry point, r2 = stack pointer
 
+    ldr r3, =dbg2
+    push {r0-r2}
+    mov r0, r3
+    bl uart_puts
+    pop {r0-r2}
+
     // Save entry and SP before TTBR switch
     mov r4, r1              // r4 = entry point
     mov r5, r2              // r5 = process SP
@@ -106,6 +142,19 @@ launch_process:
     mov r0, #0
     mcr p15, 0, r0, c8, c7, 0
     mcr p15, 0, r0, c7, c5, 4
+
+    // Cache maintenance: process code was written through higher-half VA
+    // but will execute from 0x00100000. ARM1176 has VIVT caches.
+    // D-cache was cleaned by MVA during alloc_process.
+    // Now invalidate the entire I-cache.
+    mcr p15, 0, r0, c7, c5, 0   // Invalidate entire I-cache
+    mcr p15, 0, r0, c7, c10, 4  // Data Synchronization Barrier
+    mcr p15, 0, r0, c7, c5, 4   // Prefetch Flush (ISB)
+
+    push {r4, r5}
+    ldr r0, =dbg3
+    bl uart_puts
+    pop {r4, r5}
 
     // Set process stack and jump to entry point
     mov sp, r5
@@ -142,9 +191,10 @@ enable_mmu:
     // 3. Set Translation Table Base Register 0 (TTBR0)
     mcr p15, 0, r0, c2, c0, 0
 
-    // 4. Enable MMU in System Control Register (SCTLR)
+    // 4. Enable MMU and ARMv6 Extended Page Tables (SCTLR)
     mrc p15, 0, r1, c1, c0, 0
-    orr r1, r1, #1
+    orr r1, r1, #1              // MMU Enable
+    orr r1, r1, #(1 << 23)      // XP Enable (ARMv6 Page Table Format)
     mcr p15, 0, r1, c1, c0, 0
 
     // 5. Flush Prefetch Buffer
@@ -157,7 +207,11 @@ enable_mmu:
 .section ".rodata"
 welcome_msg:
     .asciz "Welcome to A6OS!\r\n"
-debug_msg:
-    .asciz "UART still works!\r\n"
 returned_msg:
     .asciz "Process exited, returned to kernel.\r\n"
+dbg1:
+    .asciz "[DBG] MMU on\r\n"
+dbg2:
+    .asciz "[DBG] Process allocated\r\n"
+dbg3:
+    .asciz "[DBG] TTBR switched\r\n"

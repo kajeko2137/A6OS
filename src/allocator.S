@@ -134,9 +134,6 @@ init_kernel_mmu:
     ldr r3, =0x402
     bl map_l1_section
 
-    ldr r0, =kernel_mmu_msg
-    bl uart_puts
-
     mov r0, r4              // r0 = L1 table base for enable_mmu
     pop {r4-r7, pc}
 
@@ -242,7 +239,7 @@ alloc_process:
     orr r2, r2, #0x02
     str r2, [r1, #4]        // L2[1]
 
-    // ---- Allocate stack page -> L2[2] (virt 0x00102000) ----
+    // ---- Allocate stack page -> L2[255] (virt 0x001FF000) ----
     bl alloc_page
     cmp r0, #0
     beq process_fail
@@ -252,7 +249,7 @@ alloc_process:
     add r1, r6, r1
     orr r2, r0, #0x30
     orr r2, r2, #0x02
-    str r2, [r1, #8]        // L2[2]
+    str r2, [r1, #1020]        // L2[255]
 
     // ---- Write process descriptor into L2 page (offset 0x400) ----
     // The L2 table only uses 1KB (0x000-0x3FF). We store the process
@@ -296,14 +293,20 @@ alloc_process:
     strb r3, [r0], #1
     b 3b
 4:
+    // Clean D-cache for the copied region by MVA (ARM1176 doesn't support entire D-cache clean)
+    ldr r1, =0x80000000
+    add r1, r7, r1          // r1 = start of copied region
+5:  cmp r1, r0              // r0 = end of copied region
+    bge 6f
+    mcr p15, 0, r1, c7, c10, 1  // Clean D-cache single entry by MVA
+    add r1, r1, #32             // 32-byte cache line
+    b 5b
+6:
 
     // ---- Return ----
-    ldr r0, =proc_alloc_msg
-    bl uart_puts
-
     mov r0, r4              // r0 = L1 table base (physical)
     ldr r1, =0x00100000     // r1 = entry point (virtual)
-    ldr r2, =0x00103000     // r2 = SP (top of stack page)
+    ldr r2, =0x00200000     // r2 = SP (top of stack page at L2[255])
     pop {r4-r10, pc}
 
 process_fail:
@@ -373,8 +376,78 @@ delete_process:
     str r6, [r5]            // process_count--
 
 .del_done:
-    ldr r0, =proc_deleted_msg
+    pop {r4-r7, pc}
+
+// -----------------------------------------------------------------
+// Allocate a New Page for the Calling Process
+// Called from SWI handler while process page table is active.
+// Scans L2 entries 2..254 for a free slot, allocates a page, maps it,
+// and adds it to the process descriptor.
+// Returns: r0 = virtual address of new page (0 if fail)
+// -----------------------------------------------------------------
+.globl alloc_process_page
+alloc_process_page:
+    push {r4-r7, lr}
+
+    // Get L2 phys addr from TTBR0 -> L1[1]
+    mrc p15, 0, r0, c2, c0, 0  // r0 = process L1 phys addr
+    ldr r1, =0x80000000
+    add r0, r0, r1              // r0 = L1 virtual addr
+    ldr r0, [r0, #4]            // r0 = L1[1] coarse descriptor
+    bic r4, r0, #0xFF           // r4 = L2 phys addr
+
+    // Access L2 table via higher-half
+    ldr r5, =0x80000000
+    add r5, r4, r5              // r5 = L2 virtual addr
+
+    // Scan for free L2 entry (index 2..254, skip 0=code, 1=heap, 255=stack)
+    mov r6, #2
+.scan_l2:
+    cmp r6, #255
+    bge .alloc_pg_fail          // No free slot
+    ldr r0, [r5, r6, lsl #2]
+    cmp r0, #0
+    beq .found_free_l2
+    add r6, r6, #1
+    b .scan_l2
+
+.found_free_l2:
+    // Allocate a physical page
+    bl alloc_page
+    cmp r0, #0
+    beq .alloc_pg_fail
+    mov r7, r0                  // r7 = new page phys addr
+
+    // Write L2 entry
+    orr r1, r7, #0x30           // AP=0b11<<4
+    orr r1, r1, #0x02           // Small page type
+    str r1, [r5, r6, lsl #2]   // L2[index]
+
+    // Update process descriptor at L2 + 0x400
+    add r0, r5, #0x400          // r0 = descriptor base
+    ldr r1, [r0, #0]            // r1 = current count
+    add r2, r1, #1              // r2 = new count
+    str r7, [r0, r2, lsl #2]    // descriptor[new_count] = phys addr
+    // Compute virtual address: 0x00100000 + (L2_index * 0x1000)
+    lsl r0, r6, #12
+    ldr r1, =0x00100000
+    add r0, r0, r1              // r0 = virtual address
+
+    // Invalidate the TLB so the newly added page translates correctly
+    mov r1, #0
+    mcr p15, 0, r1, c8, c7, 0   // Invalidate entire TLB
+    mcr p15, 0, r1, c7, c5, 4   // Flush Prefetch Buffer
+
+    // Debug message
+    push {r0}
+    ldr r0, =alloc_pg_msg
     bl uart_puts
+    pop {r0}
+
+    pop {r4-r7, pc}
+
+.alloc_pg_fail:
+    mov r0, #0
     pop {r4-r7, pc}
 
 // -----------------------------------------------------------------
@@ -424,6 +497,114 @@ alloc_page:
     bx lr
 
 // -----------------------------------------------------------------
+// Free a Page belonging to the Calling Process
+// Called from SWI handler (SWI 3) while process page table is active.
+// r0 = Virtual Address to free.
+// 1. Validates address is between 0x00102000 and 0x001FEFFF.
+// 2. Looks up L2 entry, calls free_page on physical address.
+// 3. Clears L2 entry, removes from descriptor, flushes TLB.
+// Returns: r0 = 0 (Success), or -1 (Error)
+// -----------------------------------------------------------------
+.globl free_process_page
+free_process_page:
+    push {r4-r8, lr}
+    mov r4, r0                  // r4 = requested virtual address
+
+    // 1. Validate virtual address bounds
+    ldr r1, =0x00102000         // Lowest valid dynamic addr (L2[2])
+    cmp r4, r1
+    blt .free_pg_fail
+
+    ldr r1, =0x001FF000         // Highest valid dynamic addr (L2[255])
+    cmp r4, r1
+    bge .free_pg_fail           // Protect the stack and beyond
+    
+    // Check page alignment (must be 4KB aligned)
+    ldr r1, =0xFFF
+    tst r4, r1
+    bne .free_pg_fail
+
+    // 2. Get L2 phys addr from TTBR0 -> L1[1]
+    mrc p15, 0, r0, c2, c0, 0   // r0 = process L1 phys addr
+    ldr r1, =0x80000000
+    add r0, r0, r1               // r0 = L1 virtual addr
+    ldr r0, [r0, #4]             // r0 = L1[1] coarse descriptor
+    bic r5, r0, #0xFF            // r5 = L2 phys addr
+
+    // Access L2 table via higher-half
+    ldr r6, =0x80000000
+    add r6, r5, r6               // r6 = L2 virtual addr
+
+    // Calculate L2 index from Virtual Address
+    // Virtual Addr: 0x001XXXXX
+    ldr r1, =0x00100000
+    sub r7, r4, r1               // r7 = Offset into 1MB section
+    lsr r7, r7, #12              // r7 = L2 index (2..254)
+
+    // Ensure it's currently mapped
+    ldr r0, [r6, r7, lsl #2]     // Read L2 entry
+    cmp r0, #0
+    beq .free_pg_fail            // Already vacant
+
+    // Extract physical address (Top 20 bits)
+    ldr r1, =0xFFFFF000
+    and r8, r0, r1               // r8 = physical page address
+
+    // 3. Unmap from L2
+    mov r0, #0
+    str r0, [r6, r7, lsl #2]     // Clear L2 entry
+
+    // 4. Remove from process descriptor
+    add r1, r6, #0x400           // r1 = descriptor base
+    ldr r2, [r1, #0]             // r2 = count
+    mov r0, #1                   // r0 = search index (start at 1)
+
+.desc_search:
+    cmp r0, r2
+    bgt .desc_done               // Not found in descriptor? Safety exit.
+    ldr r3, [r1, r0, lsl #2]
+    cmp r3, r8
+    beq .desc_found
+    add r0, r0, #1
+    b .desc_search
+
+.desc_found:
+    // Shift elements down
+.desc_shift:
+    add r3, r0, #1               // Next index
+    cmp r3, r2
+    bgt .desc_shrink
+    ldr r4, [r1, r3, lsl #2]
+    str r4, [r1, r0, lsl #2]
+    add r0, r0, #1
+    b .desc_shift
+
+.desc_shrink:
+    sub r2, r2, #1               // count--
+    str r2, [r1, #0]
+
+.desc_done:
+    // 5. Free physical memory
+    mov r0, r8
+    bl free_page
+
+    // 6. Invalidate TLB completely
+    mov r1, #0
+    mcr p15, 0, r1, c8, c7, 0   // Invalidate entire TLB
+    mcr p15, 0, r1, c7, c5, 4   // Flush Prefetch Buffer
+
+    // Debug message
+    ldr r0, =free_pg_msg
+    bl uart_puts
+
+    mov r0, #0                  // Success
+    pop {r4-r8, pc}
+
+.free_pg_fail:
+    mov r0, #-1                 // Failed
+    pop {r4-r8, pc}
+
+// -----------------------------------------------------------------
 // Free a 4KB Page
 // r0 = physical address of the page to free
 // -----------------------------------------------------------------
@@ -459,9 +640,7 @@ process_list:
     .space (MAX_PROCESSES * 4)  // L2 phys addrs (descriptor at +0x400)
 
 .section ".rodata"
-kernel_mmu_msg:
-    .asciz "Kernel MMU tables ready.\r\n"
-proc_alloc_msg:
-    .asciz "Process allocated: L1, L2, code, heap, stack ready.\r\n"
-proc_deleted_msg:
-    .asciz "Process deleted: all pages freed.\r\n"
+alloc_pg_msg:
+    .asciz "Allocated page for process.\r\n"
+free_pg_msg:
+    .asciz "Freed page for process.\r\n"
