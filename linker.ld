@@ -9,6 +9,13 @@ SECTIONS
     {
         /* Keep our boot code at the very beginning */
         KEEP(*(.text.boot))
+
+        /* Process1 code — bracketed by symbols for runtime memcpy */
+        . = ALIGN(4);
+        _process1_start = .;
+        KEEP(*(.text.process1))
+        _process1_end = .;
+
         *(.text .text.*)
     }
 

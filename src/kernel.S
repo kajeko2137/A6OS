@@ -30,15 +30,21 @@ _start:
     ldr r0, =welcome_msg
     bl uart_puts    
 
-    // Allocate a process
-    bl alloc_process
+    // Set up kernel MMU tables (identity + UART + higher-half)
+    bl init_kernel_mmu
 
+    // Enable the MMU with the kernel's L1 table (returned in r0)
     bl enable_mmu
     
     // Send the debug message
     ldr r0, =debug_msg
     bl uart_puts
-    
+
+    // Now that MMU is on, allocate a process (uses higher-half addresses)
+    ldr r0, =_process1_start
+    ldr r1, =_process1_end
+    bl alloc_process
+
     // Halt the CPU in an infinite loop
 halt:
     b halt

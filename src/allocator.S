@@ -81,51 +81,227 @@ map_l1_section:
     bx lr
 
 // -----------------------------------------------------------------
-// Allocate Process
-// Returns L1 table address in r0
+// Initialize Kernel MMU Tables (call BEFORE enable_mmu)
+// Allocates L1 table, maps kernel identity, UART, and 512MB
+// higher-half (0x80000000+ -> physical RAM).
+// Returns: r0 = L1 table physical address (for enable_mmu)
 // -----------------------------------------------------------------
-.globl alloc_process
-alloc_process:
-    push {r4, lr}           // Save r4 and link register
-    
+.globl init_kernel_mmu
+init_kernel_mmu:
+    push {r4-r7, lr}
+
+    // Allocate & zero L1 table
     bl alloc_l1_table
     cmp r0, #0
-    beq process_fail
-    
-    mov r4, r0              // Save L1 table base in r4
+    beq .kernel_mmu_fail
+    mov r4, r0              // r4 = L1 table base
 
-    // Zero out the 16KB table to prevent MMU crashes
     mov r1, r0
     ldr r2, =0x4000
     add r2, r1, r2
     mov r3, #0
-1:  str r3, [r1], #4        // Write 0 and increment r1 by 4
+1:  str r3, [r1], #4
     cmp r1, r2
     blo 1b
 
-    // Map Kernel (0x0 -> 0x0)
+    // Map 512MB Physical RAM to Higher-Half (0x80000000+)
+    ldr r5, =0x80000000     // r5 = current virtual address
+    mov r6, #0              // r6 = current physical address
+    ldr r7, =512            // r7 = loop counter (512 x 1MB)
+2:
     mov r0, r4
-    mov r1, #0
-    mov r2, #0
+    mov r1, r5
+    mov r2, r6
     ldr r3, =0x402          // Privileged RW Section
     bl map_l1_section
 
-    // Map UART (0x20200000 -> 0x20200000)
+    add r5, r5, #0x100000
+    add r6, r6, #0x100000
+    subs r7, r7, #1
+    bne 2b
+
+    // Identity map kernel (0x0 -> 0x0) — needed to survive MMU enable
+    mov r0, r4
+    mov r1, #0
+    mov r2, #0
+    ldr r3, =0x402
+    bl map_l1_section
+
+    // Identity map UART (0x20200000 -> 0x20200000)
     mov r0, r4
     ldr r1, =0x20200000
     ldr r2, =0x20200000
     ldr r3, =0x402
     bl map_l1_section
 
-    ldr r0, =mmu_map_msg
+    ldr r0, =kernel_mmu_msg
     bl uart_puts
 
-    mov r0, r4              // Restore L1 address to return it
-    pop {r4, pc}
+    mov r0, r4              // r0 = L1 table base for enable_mmu
+    pop {r4-r7, pc}
+
+.kernel_mmu_fail:
+    mov r0, #0
+    pop {r4-r7, pc}
+
+// -----------------------------------------------------------------
+// Allocate Process (call AFTER MMU is enabled)
+// r0 = start address of process code (in kernel image)
+// r1 = end address of process code
+// Returns: r0 = L1 table, r1 = entry point, r2 = stack pointer
+// -----------------------------------------------------------------
+.globl alloc_process
+alloc_process:
+    push {r4-r10, lr}
+    mov r10, r0             // r10 = process code start
+    mov r9, r1              // r9 = process code end (reused later)
+
+    // ---- Allocate & zero process L1 table ----
+    bl alloc_l1_table
+    cmp r0, #0
+    beq process_fail
+    mov r4, r0              // r4 = L1 table base (physical)
+
+    // Zero through higher-half virtual address
+    ldr r1, =0x80000000
+    add r1, r0, r1          // r1 = L1 table virtual addr
+    ldr r2, =0x4000
+    add r2, r1, r2
+    mov r3, #0
+1:  str r3, [r1], #4
+    cmp r1, r2
+    blo 1b
+
+    // Compute L1 table virtual addr for writing descriptors
+    ldr r5, =0x80000000
+    add r5, r4, r5          // r5 = L1 table virtual addr
+
+    // Identity map kernel (0x0 -> 0x0)
+    mov r0, r5
+    mov r1, #0
+    mov r2, #0
+    ldr r3, =0x402
+    bl map_l1_section
+
+    // Identity map UART (0x20200000 -> 0x20200000)
+    mov r0, r5
+    ldr r1, =0x20200000
+    ldr r2, =0x20200000
+    ldr r3, =0x402
+    bl map_l1_section
+
+    // Map 512MB higher-half (0x80000000+ -> 0x0+)
+    ldr r6, =0x80000000
+    mov r7, #0
+    ldr r8, =512
+2:
+    mov r0, r5
+    mov r1, r6
+    mov r2, r7
+    ldr r3, =0x402
+    bl map_l1_section
+
+    add r6, r6, #0x100000
+    add r7, r7, #0x100000
+    subs r8, r8, #1
+    bne 2b
+
+    // ---- Allocate L2 table ----
+    bl alloc_l2_table
+    cmp r0, #0
+    beq process_fail
+    mov r6, r0              // r6 = L2 table phys addr
+
+    // Write L1 coarse descriptor: L1[1] -> L2 table
+    // L1 index for virt 0x00100000 = 1, byte offset = 4
+    orr r1, r6, #0x01       // coarse descriptor = L2 base | 0x01
+    str r1, [r5, #4]        // L1[1] via virtual addr
+
+    // ---- Allocate code page -> L2[0] (virt 0x00100000) ----
+    bl alloc_page
+    cmp r0, #0
+    beq process_fail
+    mov r7, r0              // r7 = code page phys addr
+
+    // Write L2 entry via higher-half
+    ldr r1, =0x80000000
+    add r1, r6, r1          // r1 = L2 table virtual addr
+    orr r2, r7, #0x30       // AP=0b11<<4
+    orr r2, r2, #0x02       // Small page type
+    str r2, [r1, #0]        // L2[0]
+
+    // ---- Allocate heap page -> L2[1] (virt 0x00101000) ----
+    bl alloc_page
+    cmp r0, #0
+    beq process_fail
+    mov r8, r0              // r8 = heap page phys addr
+
+    ldr r1, =0x80000000
+    add r1, r6, r1
+    orr r2, r8, #0x30
+    orr r2, r2, #0x02
+    str r2, [r1, #4]        // L2[1]
+
+    // ---- Allocate stack page -> L2[2] (virt 0x00102000) ----
+    bl alloc_page
+    cmp r0, #0
+    beq process_fail
+
+    ldr r1, =0x80000000
+    add r1, r6, r1
+    orr r2, r0, #0x30
+    orr r2, r2, #0x02
+    str r2, [r1, #8]        // L2[2]
+
+    // ---- Copy process code into code page (via higher-half) ----
+    ldr r0, =0x80000000
+    add r0, r7, r0          // dest = code page virtual addr
+    mov r1, r10             // src = process code start (from argument)
+    mov r2, r9              // end = process code end (from argument)
+3:  cmp r1, r2
+    bge 4f
+    ldrb r3, [r1], #1
+    strb r3, [r0], #1
+    b 3b
+4:
+
+    // ---- Return ----
+    ldr r0, =proc_alloc_msg
+    bl uart_puts
+
+    mov r0, r4              // r0 = L1 table base (physical)
+    ldr r1, =0x00100000     // r1 = entry point (virtual)
+    ldr r2, =0x00103000     // r2 = SP (top of stack page)
+    pop {r4-r10, pc}
 
 process_fail:
     mov r0, #0
-    pop {r4, pc}
+    pop {r4-r10, pc}
+
+// -----------------------------------------------------------------
+// Allocate L2 Table (allocate a 4KB page and zero it)
+// Returns physical address in r0 (0 if fail)
+// -----------------------------------------------------------------
+.globl alloc_l2_table
+alloc_l2_table:
+    push {r4, lr}
+    bl alloc_page
+    cmp r0, #0
+    beq 1f
+
+    // Zero the full 4KB page via higher-half virtual address
+    mov r4, r0              // r4 = physical address (to return)
+    ldr r1, =0x80000000
+    add r1, r0, r1          // r1 = virtual address
+    ldr r2, =0x1000
+    add r2, r1, r2
+    mov r3, #0
+5:  str r3, [r1], #4
+    cmp r1, r2
+    blo 5b
+
+    mov r0, r4
+1:  pop {r4, pc}
 
 // -----------------------------------------------------------------
 // Allocate 4KB Page
@@ -148,10 +324,25 @@ alloc_page:
     lsl r0, r2, #12
     bx lr
 
+// -----------------------------------------------------------------
+// Free a 4KB Page
+// r0 = physical address of the page to free
+// -----------------------------------------------------------------
+.globl free_page
+free_page:
+    lsr r1, r0, #12        // Convert address to page index
+    ldr r0, =page_table
+    mov r2, #0
+    strb r2, [r0, r1]      // Mark page as free
+    bx lr
+
+
 .section ".bss"
 page_table:
     .space NUM_PAGES
 
 .section ".rodata"
-mmu_map_msg:
-    .asciz "Kernel and UART mapped to L1 Table.\r\n"
+kernel_mmu_msg:
+    .asciz "Kernel MMU tables ready.\r\n"
+proc_alloc_msg:
+    .asciz "Process allocated: L1, L2, code, heap, stack ready.\r\n"
