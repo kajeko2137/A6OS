@@ -1,6 +1,6 @@
 // process1.S — Simple test process
 // Loops 10 times as a proof-of-concept.
-// No UART calls (avoids PC-relative branch issues when relocated).
+// Exits via SWI syscall.
 // Entry point: process1_entry
 
 .section ".text.process1"
@@ -15,6 +15,7 @@ process1_entry:
     cmp r0, r1
     blt .loop
 
-    // Done — loop forever (process has no scheduler to return to yet)
-.done:
-    b .done
+    // Done - call sys_exit
+    mov r0, #0
+    mov r7, #1
+    swi #0

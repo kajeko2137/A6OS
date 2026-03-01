@@ -20,6 +20,9 @@ _start:
     b 1b
 2:
 
+    // Install the exception vector table at address 0x0
+    bl install_vectors
+
     // Now we can safely initialize the system
     bl uart_init
 
@@ -33,6 +36,10 @@ _start:
     // Set up kernel MMU tables (identity + UART + higher-half)
     bl init_kernel_mmu
 
+    // Save the kernel's L1 table address for sys_exit
+    ldr r1, =kernel_l1_base
+    str r0, [r1]
+
     // Enable the MMU with the kernel's L1 table (returned in r0)
     bl enable_mmu
     
@@ -40,14 +47,70 @@ _start:
     ldr r0, =debug_msg
     bl uart_puts
 
-    // Now that MMU is on, allocate a process (uses higher-half addresses)
+    // Launch process1
     ldr r0, =_process1_start
     ldr r1, =_process1_end
-    bl alloc_process
+    bl launch_process
+
+    // Process returned via sys_exit — fall through here
+.globl kernel_after_process
+kernel_after_process:
+    ldr r0, =returned_msg
+    bl uart_puts
 
     // Halt the CPU in an infinite loop
+.globl halt
 halt:
     b halt
+
+// -----------------------------------------------------------------
+// Install Exception Vector Table
+// Copies 64 bytes (8 vectors + 8 address words) from _vectors to 0x0
+// -----------------------------------------------------------------
+install_vectors:
+    ldr r0, =_vectors       // source
+    mov r1, #0              // destination = 0x00000000
+    mov r2, #16             // 16 words = 64 bytes
+1:
+    ldr r3, [r0], #4
+    str r3, [r1], #4
+    subs r2, r2, #1
+    bne 1b
+    bx lr
+
+// -----------------------------------------------------------------
+// Launch Process
+// r0 = process code start, r1 = process code end
+// Allocates the process, switches to its page table, and jumps in.
+// -----------------------------------------------------------------
+.globl launch_process
+launch_process:
+    push {r4-r5, lr}
+
+    // Save kernel stack pointer
+    ldr r3, =kernel_sp
+    str sp, [r3]
+
+    // Allocate the process
+    bl alloc_process
+    // r0 = L1 table base, r1 = entry point, r2 = stack pointer
+
+    // Save entry and SP before TTBR switch
+    mov r4, r1              // r4 = entry point
+    mov r5, r2              // r5 = process SP
+
+    // Switch TTBR0 to process L1 table
+    mcr p15, 0, r0, c2, c0, 0
+
+    // Invalidate TLB and flush prefetch
+    mov r0, #0
+    mcr p15, 0, r0, c8, c7, 0
+    mcr p15, 0, r0, c7, c5, 4
+
+    // Set process stack and jump to entry point
+    mov sp, r5
+    bx r4
+    // Does not return — sys_exit brings us back to kernel_after_process
 
 // -----------------------------------------------------------------
 // Reserve 1MB (256 pages) of physical memory for the kernel
@@ -96,4 +159,5 @@ welcome_msg:
     .asciz "Welcome to A6OS!\r\n"
 debug_msg:
     .asciz "UART still works!\r\n"
-
+returned_msg:
+    .asciz "Process exited, returned to kernel.\r\n"

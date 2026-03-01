@@ -246,12 +246,44 @@ alloc_process:
     bl alloc_page
     cmp r0, #0
     beq process_fail
+    push {r0}               // Save stack page phys addr (out of regs)
 
     ldr r1, =0x80000000
     add r1, r6, r1
     orr r2, r0, #0x30
     orr r2, r2, #0x02
     str r2, [r1, #8]        // L2[2]
+
+    // ---- Write process descriptor into L2 page (offset 0x400) ----
+    // The L2 table only uses 1KB (0x000-0x3FF). We store the process
+    // descriptor in the remaining 3KB, safe from user-mode access.
+    // Layout: [count, L1p0, L1p1, L1p2, L1p3, L2, code, heap, stack]
+    ldr r0, =0x80000000
+    add r0, r6, r0          // r0 = L2 page virtual addr
+    add r0, r0, #0x400      // skip past the 1KB L2 table entries
+    pop {r3}                // r3 = stack page phys addr
+
+    mov r1, #8
+    str r1, [r0, #0]        // [0]  count = 8
+    str r4, [r0, #4]        // [4]  L1 page 0
+    add r1, r4, #0x1000
+    str r1, [r0, #8]        // [8]  L1 page 1
+    add r1, r4, #0x2000
+    str r1, [r0, #12]       // [12] L1 page 2
+    add r1, r4, #0x3000
+    str r1, [r0, #16]       // [16] L1 page 3
+    str r6, [r0, #20]       // [20] L2 table
+    str r7, [r0, #24]       // [24] code page
+    str r8, [r0, #28]       // [28] heap page
+    str r3, [r0, #32]       // [32] stack page
+
+    // ---- Register process in kernel process list ----
+    ldr r0, =process_count
+    ldr r1, [r0]
+    ldr r2, =process_list
+    str r6, [r2, r1, lsl #2]   // process_list[count] = L2 phys addr
+    add r1, r1, #1
+    str r1, [r0]               // process_count++
 
     // ---- Copy process code into code page (via higher-half) ----
     ldr r0, =0x80000000
@@ -277,6 +309,73 @@ alloc_process:
 process_fail:
     mov r0, #0
     pop {r4-r10, pc}
+
+// -----------------------------------------------------------------
+// Delete Process
+// r0 = L2 page physical address (used to find descriptor at +0x400)
+// Reads the process descriptor, frees all listed pages, and removes
+// the process from the kernel process list.
+// Must be called with kernel page table active in TTBR0.
+// -----------------------------------------------------------------
+.globl delete_process
+delete_process:
+    push {r4-r7, lr}
+    mov r4, r0              // r4 = L2 phys addr
+
+    // Access descriptor via higher-half
+    ldr r5, =0x80000000
+    add r5, r4, r5
+    add r5, r5, #0x400      // r5 = descriptor virtual addr
+
+    // Read page count
+    ldr r6, [r5, #0]        // r6 = count
+    mov r7, #0              // r7 = index
+
+.del_loop:
+    cmp r7, r6
+    bge .del_remove_from_list
+    add r0, r7, #1          // entry offset = (index+1) * 4
+    ldr r0, [r5, r0, lsl #2]
+    bl free_page
+    add r7, r7, #1
+    b .del_loop
+
+.del_remove_from_list:
+    // Remove this process from process_list
+    ldr r5, =process_count
+    ldr r6, [r5]            // r6 = count
+    ldr r7, =process_list
+    mov r0, #0              // r0 = search index
+
+.del_find:
+    cmp r0, r6
+    bge .del_done           // Not found (shouldn't happen)
+    ldr r1, [r7, r0, lsl #2]
+    cmp r1, r4              // Compare with our L2 addr
+    beq .del_found
+    add r0, r0, #1
+    b .del_find
+
+.del_found:
+    // Shift remaining entries down by one
+    add r1, r0, #1          // r1 = next index
+.del_shift:
+    cmp r1, r6
+    bge .del_dec_count
+    ldr r2, [r7, r1, lsl #2]
+    str r2, [r7, r0, lsl #2]
+    add r0, r0, #1
+    add r1, r1, #1
+    b .del_shift
+
+.del_dec_count:
+    sub r6, r6, #1
+    str r6, [r5]            // process_count--
+
+.del_done:
+    ldr r0, =proc_deleted_msg
+    bl uart_puts
+    pop {r4-r7, pc}
 
 // -----------------------------------------------------------------
 // Allocate L2 Table (allocate a 4KB page and zero it)
@@ -341,8 +440,28 @@ free_page:
 page_table:
     .space NUM_PAGES
 
+// Kernel globals
+.globl kernel_l1_base
+kernel_l1_base:
+    .space 4                    // Physical addr of kernel's L1 table
+
+.globl kernel_sp
+kernel_sp:
+    .space 4                    // Saved kernel stack pointer
+
+.equ MAX_PROCESSES, 16
+.globl process_count
+process_count:
+    .space 4                    // Number of active processes
+
+.globl process_list
+process_list:
+    .space (MAX_PROCESSES * 4)  // L2 phys addrs (descriptor at +0x400)
+
 .section ".rodata"
 kernel_mmu_msg:
     .asciz "Kernel MMU tables ready.\r\n"
 proc_alloc_msg:
     .asciz "Process allocated: L1, L2, code, heap, stack ready.\r\n"
+proc_deleted_msg:
+    .asciz "Process deleted: all pages freed.\r\n"
