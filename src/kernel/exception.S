@@ -94,7 +94,7 @@ data_handler:
     beq .lazy_alloc
 
     // Success! Return from exception and retry the instruction
-    pop {r0-r3, lr}
+    pop {r0-r12, lr}
     movs pc, lr
 
 .abort_fatal:
