@@ -154,7 +154,7 @@ irq_handler:
     bne .resumme_Kernel
     b context_switch
 
-resumme_Kernel:
+.resumme_Kernel:
     // telling the kernel to run scheduler after finnishing interrupt
     ldr r0, =needs_reschedule
     mov r1, #1
