@@ -33,7 +33,7 @@ undef_handler:
     b halt_sys
 
 swi_handler:
-    push {lr}               // Save return address (bl clobbers LR in SVC mode)
+    push {r0-r12, lr}               // Save return address (bl clobbers LR in SVC mode)
 
     cmp r7, #1
     beq sys_exit
@@ -43,6 +43,16 @@ swi_handler:
 
     cmp r7, #3
     beq sys_free_page
+
+    //check if scheduler fired in the meantime 
+    ldr r0, =needs_reschedule
+    ldr r1, [r0]
+    cmp r0, #1
+    beq context_switch
+
+    // Success! Return from exception and retry the instruction
+    pop {r0-12, lr}
+    movs pc, lr
 
     // Unknown syscall
     ldr r0, =msg_swi
@@ -54,8 +64,7 @@ swi_handler:
 // Returns: r0 = virtual address of new page (0 if fail)
 sys_alloc_page:
     bl alloc_process_page   // r0 = virtual address (or 0)
-    pop {lr}
-    movs pc, lr             // Return to process, r0 is preserved!
+    bx lr
 
 // sys_free_page — Syscall #3
 // Frees a previously allocated page.
@@ -63,8 +72,7 @@ sys_alloc_page:
 // Returns: r0 = 0 (Success) or -1 (Fail)
 sys_free_page:
     bl free_process_page
-    pop {lr}
-    movs pc, lr
+    bx lr
 
 prefetch_handler:
     ldr r0, =msg_prefetch
@@ -74,7 +82,7 @@ prefetch_handler:
 data_handler:
     // Sub LR by 8 to point to the instruction that caused the abort
     sub lr, lr, #8
-    push {r0-r3, lr}        // Save registers
+    push {r0-r12, lr}        // Save registers
 
     // Read DFSR (Data Fault Status Register)
     mrc p15, 0, r0, c5, c0, 0
@@ -84,6 +92,10 @@ data_handler:
     beq .lazy_alloc
     cmp r1, #7              // Page translation fault
     beq .lazy_alloc
+
+    // Success! Return from exception and retry the instruction
+    pop {r0-r3, lr}
+    movs pc, lr
 
 .abort_fatal:
     ldr r0, =msg_data
@@ -101,8 +113,8 @@ data_handler:
     ldr r0, =msg_crlf
     bl uart_puts
     
-    pop {r0-r3, lr}
-    b sys_exit              // Terminate the process
+    pop {r0-r12, lr}
+    bl sys_exit              // Terminate the process
 
 .lazy_alloc:
     // Read DFAR (Data Fault Address Register)
@@ -127,16 +139,29 @@ data_handler:
     cmp r0, #0
     beq .abort_fatal        // Allocation failed (OOM)
 
-    // Success! Return from exception and retry the instruction
-    pop {r0-r3, lr}
-    movs pc, lr
-
+    bx lr
 
 // This one will periodically fire, enabling the scheduler
 irq_handler:
-    ldr r0, =msg_irq
-    bl uart_puts
-    b halt_sys
+    //adjusting lr (this is a BCM2835 quirk)
+    sub lr, lr, #4
+
+    //check if we're in kernel mode
+    push{r0-r12, lr}
+    mrs r0, spsr
+    and r0, r0, #0x1F //we're only interested in bottom 5 bits
+    cmp r0, #0x10 // We check if we were in user mode
+    bne .resumme_Kernel
+    b context_switch
+
+resumme_Kernel:
+    // telling the kernel to run scheduler after finnishing interrupt
+    ldr r0, =needs_reschedule
+    mov r1, #1
+    str r1, [r0]
+
+    //give control back to whatever was happening before irq
+    pop{r0-r12, lr}^
 
 fiq_handler:
     ldr r0, =msg_fiq
@@ -183,6 +208,12 @@ sys_exit:
     // 7. Return to kernel
     b kernel_after_process
 
+
+.section ".bss"
+.align 4
+.globl needs_reschedule
+needs_reschedule:
+    .space 4
 
 .section ".rodata"
 msg_undef:    .asciz "\r\n[EXCEPT] Undefined Instruction\r\n"
