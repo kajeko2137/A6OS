@@ -84,10 +84,6 @@ _start:
     ldr r0, =dbg1
     bl uart_puts
 
-    // Initialize the scheduler timer and enable interrupts
-    bl init_timer
-    bl enable_interrupts
-
     // Launch process1
     ldr r0, =_process1_start
     ldr r1, =_process1_end
