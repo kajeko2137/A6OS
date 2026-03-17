@@ -28,8 +28,6 @@ fiq_addr:       .word fiq_handler
 // ---------------------------------------------------------
 
 undef_handler:
-    ldr r0, =msg_undef
-    bl uart_puts
     b halt_sys
 
 swi_handler:
@@ -45,19 +43,11 @@ swi_handler:
     beq sys_free_page
 
 .swi_return:
-    //check if scheduler fired in the meantime 
-    ldr r0, =needs_reschedule
-    ldr r1, [r0]
-    cmp r1, #1
-    beq reschedule
-
     // Success! Return from exception and retry the instruction
     pop {r0-r12, lr}
     movs pc, lr
 
     // Unknown syscall
-    ldr r0, =msg_swi
-    bl uart_puts
     b halt_sys
 
 // sys_alloc_page — Syscall #2
@@ -77,8 +67,6 @@ sys_free_page:
     b .swi_return
 
 prefetch_handler:
-    ldr r0, =msg_prefetch
-    bl uart_puts
     b halt_sys
 
 data_handler:
@@ -100,25 +88,16 @@ data_handler:
     movs pc, lr
 
 .abort_fatal:
-    ldr r0, =msg_data
-    bl uart_puts
-    
-    // Read and print DFSR
-    mrc p15, 0, r0, c5, c0, 0
-    bl uart_print_hex
-    ldr r0, =msg_space
-    bl uart_puts
-    
-    // Read and print DFAR
-    mrc p15, 0, r0, c6, c0, 0
-    bl uart_print_hex
-    ldr r0, =msg_crlf
-    bl uart_puts
-    
     pop {r0-r12, lr}
-    bl sys_exit              // Terminate the process
+    bl sys_exit             // Terminate the process
 
 .lazy_alloc:
+    // Ensure the abort occurred in User Mode (0x10)
+    mrs r1, spsr
+    and r1, r1, #0x1F
+    cmp r1, #0x10
+    bne .abort_fatal         // Do not allow lazy allocation for kernel faults!
+
     // Read DFAR (Data Fault Address Register)
     mrc p15, 0, r0, c6, c0, 0
 
@@ -175,23 +154,61 @@ irq_handler:
     mrs r0, spsr
     and r0, r0, #0x1F //we're only interested in bottom 5 bits
     cmp r0, #0x10 // We check if we were in user mode
-    bne .resumme_Kernel
+    bne .resume_kernel
     
-    // We were in user mode. We shouldn't execute reschedule from IRQ mode,
-    // and we MUST restore the registers we pushed!
-    // Normally a real scheduler would save the context to a PCB here.
-    // Since our stub just halts, we'll restore registers, switch to SVC, and jump.
-    pop {r0-r12, lr}
+    // We were in user mode! Interrupt fired while running user code.
+    // Save context!
+    ldr r0, =current_process
+    ldr r0, [r0]
+    cmp r0, #0
+    beq .skip_save               // Should not happen if in user mode, but safe
+
+    // Access via higher-half
+    ldr r1, =0x80000000
+    add r0, r0, r1
+    add r0, r0, #0x400           // r0 = Descriptor base
+
+    // Save r0-r12 using values from IRQ stack
+    add r1, r0, #36              // r1 points to [36]
+    mov r2, sp
+    ldmia r2, {r3-r10}           // load r0-r7
+    stmia r1!, {r3-r10}          // store r0-r7
+    add r2, r2, #32
+    ldmia r2, {r3-r7}            // load r8-r12
+    stmia r1!, {r3-r7}           // store r8-r12
+
+    // Save user sp and lr
+    // Switch to System Mode
+    mrs r3, cpsr
+    bic r4, r3, #0x1F
+    orr r4, r4, #0x1F
+    msr cpsr_c, r4
+    mov r5, sp                   // User SP
+    mov r6, lr                   // User LR
+    msr cpsr_c, r3               // Back to IRQ mode
+    stmia r1!, {r5, r6}
+
+    // Save user PC
+    ldr r5, [sp, #52]            // lr is at sp + 52
+    str r5, [r1], #4             // store user PC
+
+    // Save user CPSR
+    mrs r5, spsr
+    str r5, [r1], #4             // store user CPSR
+
+.skip_save:
+    // Clean up IRQ stack!
+    add sp, sp, #56
     
-    // Quick hack for the stub: change mode to SVC (0x13) to safely use uart_puts
-    mrs r13, cpsr
-    bic r13, r13, #0x1F
-    orr r13, r13, #0x13
-    msr cpsr_c, r13
+    // Switch to SVC mode
+    mrs r1, cpsr
+    bic r1, r1, #0x1F
+    orr r1, r1, #0x13
+    msr cpsr_c, r1
     
     b reschedule
 
-.resumme_Kernel:
+.resume_kernel:
     // telling the kernel to run scheduler after finnishing interrupt
     ldr r0, =needs_reschedule
     mov r1, #1
@@ -201,8 +218,6 @@ irq_handler:
     movs pc, lr
 
 fiq_handler:
-    ldr r0, =msg_fiq
-    bl uart_puts
     b halt_sys
 
 halt_sys:
@@ -251,14 +266,3 @@ sys_exit:
 .globl needs_reschedule
 needs_reschedule:
     .space 4
-
-.section ".rodata"
-msg_undef:    .asciz "\r\n[EXCEPT] Undefined Instruction\r\n"
-msg_swi:      .asciz "\r\n[EXCEPT] Unknown SWI\r\n"
-msg_prefetch: .asciz "\r\n[EXCEPT] Prefetch Abort\r\n"
-msg_data:     .asciz "\r\n[EXCEPT] Data Abort\r\n"
-msg_irq:      .asciz "\r\n[EXCEPT] Unhandled IRQ\r\n"
-msg_fiq:      .asciz "\r\n[EXCEPT] Unhandled FIQ\r\n"
-msg_swi_entry: .asciz "[DBG] SWI handler entered\r\n"
-msg_space:    .asciz " "
-msg_crlf:     .asciz "\r\n"

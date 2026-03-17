@@ -141,6 +141,13 @@ init_kernel_mmu:
     ldr r3, =0x402
     bl map_l1_section
 
+    // Identity map Hardware RNG (0x20100000 -> 0x20100000)
+    mov r0, r4
+    ldr r1, =0x20100000
+    ldr r2, =0x20100000
+    ldr r3, =0x402
+    bl map_l1_section
+
     mov r0, r4              // r0 = L1 table base for enable_mmu
     pop {r4-r7, pc}
 
@@ -198,6 +205,13 @@ alloc_process:
     mov r0, r5              
     ldr r1, =0x20000000
     ldr r2, =0x20000000
+    ldr r3, =0x402
+    bl map_l1_section
+
+    // Identity map Hardware RNG (0x20100000 -> 0x20100000)
+    mov r0, r5
+    ldr r1, =0x20100000
+    ldr r2, =0x20100000
     ldr r3, =0x402
     bl map_l1_section
 
@@ -268,7 +282,7 @@ alloc_process:
     // ---- Write process descriptor into L2 page (offset 0x400) ----
     // The L2 table only uses 1KB (0x000-0x3FF). We store the process
     // descriptor in the remaining 3KB, safe from user-mode access.
-    // Layout: [count, L1p0, L1p1, L1p2, L1p3, L2, code, heap, stack]
+    // Layout: [count, L1p0, L1p1, L1p2, L1p3, L2, code, heap, stack, r0-r12, usr_sp, usr_lr, usr_pc, usr_cpsr]
     ldr r0, =0x80000000
     add r0, r6, r0          // r0 = L2 page virtual addr
     add r0, r0, #0x400      // skip past the 1KB L2 table entries
@@ -287,6 +301,17 @@ alloc_process:
     str r7, [r0, #24]       // [24] code page
     str r8, [r0, #28]       // [28] heap page
     str r3, [r0, #32]       // [32] stack page
+
+    // Write initial process context
+    // Process starts at PC=0x00100000, SP=0x00200000, CPSR=User Mode (0x10)
+    ldr r1, =0x00100000
+    str r1, [r0, #96]       // [96] usr_pc
+    ldr r1, =0x00200000
+    str r1, [r0, #88]       // [88] usr_sp
+    mov r1, #0              // lr is whatever
+    str r1, [r0, #92]       // [92] usr_lr
+    mov r1, #0x10           // User Mode
+    str r1, [r0, #100]      // [100] usr_cpsr
 
     // Initialize heap_end and next_l2
     ldr r1, =0x00102000
@@ -325,9 +350,7 @@ alloc_process:
 6:
 
     // ---- Return ----
-    mov r0, r4              // r0 = L1 table base (physical)
-    ldr r1, =0x00100000     // r1 = entry point (virtual)
-    ldr r2, =0x00200000     // r2 = SP (top of stack page at L2[255])
+    mov r0, r6              // r0 = L2 table base (physical descriptor handle)
     pop {r4-r10, pc}
 
 process_fail:
@@ -511,11 +534,6 @@ alloc_process_page:
     // Return virtual address in r0
     mov r0, r5
 
-    push {r0}
-    ldr r0, =alloc_pg_msg
-    bl uart_puts
-    pop {r0}
-
     pop {r4-r10, pc}
 
 .alloc_pg_fail:
@@ -680,14 +698,10 @@ free_process_page:
     bl free_page
 
 .skip_l2_free:
-    // 6. Invalidate TLB completely
+    // Invalidate TLB completely
     mov r1, #0
     mcr p15, 0, r1, c8, c7, 0   // Invalidate entire TLB
     mcr p15, 0, r1, c7, c5, 4   // Flush Prefetch Buffer
-
-    // Debug message
-    ldr r0, =free_pg_msg
-    bl uart_puts
 
     mov r0, #0                  // Success
     pop {r4-r8, pc}
@@ -775,10 +789,7 @@ alloc_specific_page:
     // Return virtual address in r0
     mov r0, r5
 
-    push {r0}
-    ldr r0, =lazy_pg_msg
-    bl uart_puts
-    pop {r0}
+    pop {r4-r10, pc}
 
     pop {r4-r10, pc}
 
@@ -951,9 +962,3 @@ process_list:
     .space (MAX_PROCESSES * 4)  // L2 phys addrs (descriptor at +0x400)
 
 .section ".rodata"
-alloc_pg_msg:
-    .asciz "Allocated page for process.\r\n"
-free_pg_msg:
-    .asciz "Freed page for process.\r\n"
-lazy_pg_msg:
-    .asciz "Lazy allocated page for process.\r\n"

@@ -37,7 +37,7 @@ _start:
     msr cpsr_c, r1
     mov sp, #0x8000
 
-    // Sterilize the .bss section (Zero-out the page table)
+    // Zero-out the .bss section
     ldr r4, =__bss_start
     ldr r9, =__bss_end
     mov r5, #0
@@ -46,8 +46,8 @@ _start:
     mov r8, #0
 1:  
     cmp r4, r9
-    bhs 2f                  // If we reached the end, break out
-    stmia r4!, {r5-r8}      // Blast 16 bytes of zeroes into memory
+    bhs 2f                  // Break when end reached
+    stmia r4!, {r5-r8}      // Write 16 bytes of zeroes
     b 1b
 2:
 
@@ -77,17 +77,32 @@ _start:
     // Initialize the scheduler's memory structures
     bl init_TLS
 
-    // Arm the timer
-    bl init_timer
-    bl enable_interrupts
-
-    ldr r0, =dbg1
-    bl uart_puts
-
-    // Launch process1
+    // Enqueue process1 into Scheduler Tier 0
     ldr r0, =_process1_start
     ldr r1, =_process1_end
-    bl launch_process
+    bl alloc_process
+
+    // r0 now holds the Process Control Block (L2 physical handle)
+    ldr r1, =t0
+    ldr r1, [r1]            // r1 = buf0 physical address
+    str r0, [r1, #0]        // buf0[0] = process1 PCB handle
+    
+    ldr r1, =q0_count
+    mov r2, #1
+    str r2, [r1]            // q0_count = 1
+
+    // Arm the timer and enable interrupts
+    bl init_timer
+
+    // Save the Kernel's stack pointer before jumping out of the main thread
+    // This allows sys_exit to safely restore the stack when a program terminates
+    ldr r0, =kernel_sp
+    str sp, [r0]
+
+    bl enable_interrupts
+
+    // Jump into scheduler idle loop. The first timer tick will wake the process.
+    b system_idle
 
     // Process returned via sys_exit — fall through here
 .globl kernel_after_process
@@ -115,61 +130,7 @@ install_vectors:
     bne 1b
     bx lr
 
-// -----------------------------------------------------------------
-// Launch Process
-// r0 = process code start, r1 = process code end
-// Allocates the process, switches to its page table, and jumps in.
-// -----------------------------------------------------------------
-.globl launch_process
-launch_process:
-    push {r4-r5, lr}
 
-    // Save kernel stack pointer
-    ldr r3, =kernel_sp
-    str sp, [r3]
-
-    // Allocate the process
-    bl alloc_process
-    // r0 = L1 table base, r1 = entry point, r2 = stack pointer
-
-    ldr r3, =dbg2
-    push {r0-r2}
-    mov r0, r3
-    bl uart_puts
-    pop {r0-r2}
-
-    // Save entry and SP before TTBR switch
-    mov r4, r1              // r4 = entry point
-    mov r5, r2              // r5 = process SP
-
-    // Switch TTBR0 to process L1 table
-    mcr p15, 0, r0, c2, c0, 0
-
-    // Invalidate TLB and flush prefetch
-    mov r0, #0
-    mcr p15, 0, r0, c8, c7, 0
-    mcr p15, 0, r0, c7, c5, 4
-
-    // Cache maintenance: process code was written through higher-half VA
-    // but will execute from 0x00100000. ARM1176 has VIVT caches.
-    // D-cache was cleaned by MVA during alloc_process.
-    // Now invalidate the entire I-cache.
-    mcr p15, 0, r0, c7, c5, 0   // Invalidate entire I-cache
-    mcr p15, 0, r0, c7, c10, 4  // Data Synchronization Barrier
-    mcr p15, 0, r0, c7, c5, 4   // Prefetch Flush (ISB)
-
-    push {r4, r5}
-    ldr r0, =dbg3
-    bl uart_puts
-    pop {r4, r5}
-
-    // Drop to user mode
-    msr cpsr_c, #0x10
-
-    // Set process stack and jump to entry point
-    mov sp, r5
-    bx r4
-    // Does not return — sys_exit brings us back to kernel_after_process
 
 // -----------------------------------------------------------------
 // Reserve 1MB (256 pages) of physical memory for the kernel
@@ -219,9 +180,3 @@ welcome_msg:
     .asciz "Welcome to A6OS!\r\n"
 returned_msg:
     .asciz "Process exited, returned to kernel.\r\n"
-dbg1:
-    .asciz "[DBG] MMU on\r\n"
-dbg2:
-    .asciz "[DBG] Process allocated\r\n"
-dbg3:
-    .asciz "[DBG] TTBR switched\r\n"
