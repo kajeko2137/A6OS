@@ -17,7 +17,7 @@ OBJ_FILES  = $(patsubst $(SRC_DIR)/%.S, $(BUILD_DIR)/%_s.o, $(ASM_FILES))
 OBJ_FILES += $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/%_c.o, $(C_FILES))
 
 # Default target
-all: kernel.img
+all: kernel.img sdcard.img
 
 # Clean target
 clean:
@@ -40,3 +40,21 @@ kernel.elf: linker.ld $(OBJ_FILES)
 # Create the final binary image
 kernel.img: kernel.elf
 	$(ARMGNU)-objcopy kernel.elf -O binary kernel.img
+
+# Download missing boot files
+bootcode.bin start.elf:
+	./fetch_boot_files.sh
+
+# Create the full partitioned SD card disk image
+sdcard.img: kernel.img bootcode.bin start.elf config.txt
+	@echo "Creating SD card image (sdcard.img)..."
+	@dd if=/dev/zero of=$(BUILD_DIR)/boot.img bs=1M count=64 status=none
+	@/sbin/mkfs.fat -F 32 -h 2048 $(BUILD_DIR)/boot.img > /dev/null
+	@mcopy -i $(BUILD_DIR)/boot.img bootcode.bin start.elf config.txt kernel.img ::/
+	@dd if=/dev/zero of=$@ bs=1M count=128 status=none
+	@/sbin/parted -s $@ mklabel msdos
+	@/sbin/parted -s $@ mkpart primary fat32 1MiB 65MiB
+	@/sbin/parted -s $@ set 1 boot on
+	@/sbin/parted -s $@ set 1 lba on
+	@dd if=$(BUILD_DIR)/boot.img of=$@ bs=1M seek=1 conv=notrunc status=none
+	@echo "Successfully generated $@"

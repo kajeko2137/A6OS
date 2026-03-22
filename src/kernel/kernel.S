@@ -77,6 +77,7 @@ _start:
     // Initialize the scheduler's memory structures
     bl init_TLS
 
+
     // Temporarily disable starting process1
     // ldr r0, =_process1_start
     // ldr r1, =_process1_end
@@ -89,13 +90,17 @@ _start:
     // 
     // ldr r1, =q0_count
     // mov r2, #1
-    // str r2, [r1]            // q0_count = 1
 
-    bl sd_init
-    ldr r0, =sd_init_msg
+    // sd card init
+    bl sd_init_part1
+    ldr r0, =sd_part1_msg
     bl uart_puts
 
-    // Arm the timer and enable interrupts
+    bl sd_host_init
+    ldr r0, =sd_host_msg
+    bl uart_puts
+
+    //timer init
     bl init_timer
 
     // Save the Kernel's stack pointer before jumping out of the main thread
@@ -184,5 +189,7 @@ welcome_msg:
     .asciz "Welcome to A6OS!\r\n"
 returned_msg:
     .asciz "Process exited, returned to kernel.\r\n"
-sd_init_msg:
-    .asciz "SD Card Initialized.\r\n"
+sd_part1_msg:
+    .asciz "SD GPIO Initialized.\r\n"
+sd_host_msg:
+    .asciz "SD Host Initialized.\r\n"

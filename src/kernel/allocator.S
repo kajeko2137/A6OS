@@ -134,6 +134,13 @@ init_kernel_mmu:
     ldr r3, =0x402
     bl map_l1_section
 
+    // Identity map eMMC (0x20300000 -> 0x20300000)
+    mov r0, r4
+    ldr r1, =0x20300000
+    ldr r2, =0x20300000
+    ldr r3, =0x402
+    bl map_l1_section
+
     // Identity map Timers & Interrupt Controller (0x20000000 -> 0x20000000)
     mov r0, r4
     ldr r1, =0x20000000
@@ -198,6 +205,13 @@ alloc_process:
     mov r0, r5
     ldr r1, =0x20200000
     ldr r2, =0x20200000
+    ldr r3, =0x402
+    bl map_l1_section
+
+    // Identity map eMMC (0x20300000 -> 0x20300000)
+    mov r0, r5
+    ldr r1, =0x20300000
+    ldr r2, =0x20300000
     ldr r3, =0x402
     bl map_l1_section
 
