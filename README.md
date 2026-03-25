@@ -104,11 +104,14 @@ The build produces `kernel.img` (raw kernel binary) and `AOS.img` (partitioned 1
 
 ## Running on Hardware
 
-1. Format an SD card as **FAT32**.
-2. Copy to the root of the SD card: `bootcode.bin`, `start.elf`, `config.txt`, `kernel.img`.
-3. Connect a serial adapter to **GPIO 14 (TX)** and **GPIO 15 (RX)**.
-4. Open a serial terminal at **115200 baud, 8N1**.
-5. Insert the SD card and power on the Pi.
+1. Flash `AOS.img` to an SD card:
+   ```bash
+   sudo dd if=AOS.img of=/dev/sdX bs=1M status=progress
+   ```
+   Replace `/dev/sdX` with your SD card device (e.g. `/dev/sdb`).
+2. Connect a serial adapter to **GPIO 14 (TX)** and **GPIO 15 (RX)**.
+3. Open a serial terminal at **115200 baud, 8N1**.
+4. Insert the SD card and power on the Pi.
 
 Expected clean execution output:
 
