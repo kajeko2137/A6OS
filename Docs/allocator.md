@@ -1,6 +1,6 @@
-# A6OS Memory Allocator
+# AOS Memory Allocator
 
-The A6OS Memory Allocator provides dynamic physical page allocation, process address space management, and O(1) continuous virtual page allocation with lazy memory mapping.
+The AOS Memory Allocator provides dynamic physical page allocation, process address space management, and O(1) continuous virtual page allocation with lazy memory mapping.
 
 ## Usage Guide (Syscalls & Exceptions)
 

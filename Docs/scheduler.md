@@ -1,7 +1,7 @@
-# A6OS Scheduler Architecture Specification
+# AOS Scheduler Architecture Specification
 
 ## 1. Overview
-The A6OS scheduler is a custom Tiered Lottery Scheduler optimized for the ARM1176JZF-S (BCM2835) bare-metal environment. It uses an O(1) context switch triggered by a hardware timer.
+The AOS scheduler is a custom Tiered Lottery Scheduler optimized for the ARM1176JZF-S (BCM2835) bare-metal environment. It uses an O(1) context switch triggered by a hardware timer.
 
 The system divides active processes into 4 priority tiers (Tier 0 through Tier 3). Each process within a tier is assigned a fixed number of tickets based on its tier (e.g., Tier 0 receives 16 tickets, Tier 1 receives 8, Tier 2 receives 4, Tier 3 receives 1). On every hardware tick, the kernel calculates the total pool of active tickets and draws a random winning ticket using a software Xorshift algorithm. Because ticket weights are uniform within each tier, the scheduler computes the exact array index of the winning process mathematically, bypassing ticket-counting loops.
 

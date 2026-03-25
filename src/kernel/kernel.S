@@ -180,7 +180,7 @@ enable_mmu:
 
 .section ".rodata"
 welcome_msg:
-    .asciz "Welcome to A6OS!\r\n"
+    .asciz "Welcome to AOS!\r\n"
 returned_msg:
     .asciz "Process exited, returned to kernel.\r\n"
 sd_part1_msg:

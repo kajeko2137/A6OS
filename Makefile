@@ -17,7 +17,7 @@ OBJ_FILES  = $(patsubst $(SRC_DIR)/%.S, $(BUILD_DIR)/%_s.o, $(ASM_FILES))
 OBJ_FILES += $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/%_c.o, $(C_FILES))
 
 # Default target
-all: kernel.img A6OS.img
+all: kernel.img AOS.img
 
 # Clean target
 clean:
@@ -46,8 +46,8 @@ bootcode.bin start.elf:
 	./fetch_boot_files.sh
 
 # Create the full partitioned SD card disk image
-A6OS.img: kernel.img bootcode.bin start.elf config.txt
-	@echo "Creating SD card image (A6OS.img)..."
+AOS.img: kernel.img bootcode.bin start.elf config.txt
+	@echo "Creating SD card image (AOS.img)..."
 	@dd if=/dev/zero of=$(BUILD_DIR)/boot.img bs=1M count=64 status=none
 	@/sbin/mkfs.fat -F 32 -h 2048 $(BUILD_DIR)/boot.img > /dev/null
 	@mcopy -i $(BUILD_DIR)/boot.img bootcode.bin start.elf config.txt kernel.img ::/
